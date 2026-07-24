@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Medjay Aeris — Sensor Detail</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div id="topbarMount"></div>
+<div class="summary-strip" id="summaryStrip"></div>
+
+<div class="page-header">
+  <a class="back-btn" id="backBtn" href="index.html">&larr; Gateway</a>
+  <div class="page-title-row">
+    <div>
+      <div class="page-title editable-wrap">
+        <span id="nodeTitle">—</span>
+        <span class="edit-pencil" id="nodeNamePencil" title="Rename sensor"></span>
+      </div>
+      <div class="page-title-sub" id="nodeSub">—</div>
+    </div>
+  </div>
+  <span class="health-badge" id="nodeBadge">—</span>
+</div>
+
+<div class="detail-grid">
+  <div class="panel">
+    <div class="panel-title">Live Values</div>
+    <div id="liveValues"></div>
+    <div id="offlineNotice"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">Configuration</div>
+    <div id="configPanel"></div>
+  </div>
+
+  <div class="panel" style="grid-column:1 / -1;">
+    <div class="panel-title">
+      Event History
+      <span class="count-label" id="logCount"></span>
+    </div>
+    <div class="table-wrap">
+      <table class="log-table">
+        <thead><tr><th>Time</th><th>Event</th><th>User</th></tr></thead>
+        <tbody id="nodeLogBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="shared.js"></script>
+<script>
+document.getElementById('topbarMount').outerHTML = renderTopbar('overview');
+
+const params = new URLSearchParams(location.search);
+const nodeId = params.get('node');
+
+function metricRowLg(label, value, unit, thresholds, key){
+  let barCls = 'ok';
+  if(thresholds){
+    const dir = METRIC_DIRECTION[key] || 'high';
+    const isRed = dir === 'low' ? value <= thresholds.red : value >= thresholds.red;
+    const isAmber = dir === 'low' ? value <= thresholds.amber : value >= thresholds.amber;
+    if(isRed) barCls = 'alarm';
+    else if(isAmber) barCls = 'warn';
+  }
+  const maxRef = {temp:60, humidity:100, smoke:100, aqi:250, battery:100}[key] || 100;
+  const pct = Math.max(2, Math.min(100, (value/maxRef)*100));
+  return `<div class="metric-row lg">
+    <span class="metric-label">${label}</span>
+    <div class="metric-bar-track"><div class="metric-bar-fill ${barCls}" style="width:${pct}%"></div></div>
+    <span class="metric-value">${value}${unit}</span>
+  </div>`;
+}
+
+function thresholdRow(label, key, t, unit){
+  const dir = METRIC_DIRECTION[key] || 'high';
+  // For "bad when low" metrics like battery, red is numerically the
+  // smaller value — show them in ascending order (red / amber) so the
+  // pair still reads left-to-right as "worse → better".
+  const display = dir === 'low' ? `${t.red} / ${t.amber}` : `${t.amber} / ${t.red}`;
+  const orderLabel = dir === 'low' ? 'red / amber' : 'amber / red';
+  return `<div class="config-row" data-threshold="${key}">
+    <span class="form-label">${label} ${orderLabel}${unit?` (${unit})`:''}</span>
+    <span class="editable-wrap">
+      <span class="config-value" data-display="${key}">${display}</span>
+      <span class="edit-pencil" data-edit-threshold="${key}" title="Edit ${label.toLowerCase()} thresholds">${ICONS.pencil}</span>
+    </span>
+  </div>`;
+}
+
+function render(){
+  const res = MedjayData.getNode(nodeId);
+  document.getElementById('summaryStrip').innerHTML = renderSummaryStripHTML();
+  if(!res){
+    document.getElementById('liveValues').innerHTML = `<div class="empty-state">Sensor node not found.</div>`;
+    document.getElementById('configPanel').innerHTML = '';
+    return;
+  }
+  const { node, gateway } = res;
+  document.getElementById('backBtn').href = `gateway-detail.html?gw=${encodeURIComponent(gateway.id)}`;
+  document.getElementById('backBtn').innerHTML = `${ICONS.back} ${gateway.name}`;
+
+  const sev = nodeSeverity(node);
+  const badgeMap = {alarm:"ALARM", warn:"WARNING", offline:"OFFLINE", ok:"NORMAL"};
+  document.getElementById('nodeTitle').textContent = node.name;
+  document.getElementById('nodeNamePencil').innerHTML = ICONS.pencil;
+  document.getElementById('nodeNamePencil').onclick = ()=>{
+    if(!requestEditUnlock()) return;
+    const newName = window.prompt('Sensor name:', node.name);
+    if(newName && newName.trim()){ MedjayData.renameNode(node.id, newName.trim()); showToast('Sensor renamed'); render(); }
+  };
+  document.getElementById('nodeSub').innerHTML = `${node.id} &nbsp;·&nbsp; ${gateway.name} — ${gateway.location} &nbsp;·&nbsp; Updated ${fmtMinutes(node.lastUpdated)}`;
+  const badgeEl = document.getElementById('nodeBadge');
+  badgeEl.textContent = badgeMap[sev];
+  badgeEl.className = `health-badge ${sev}`;
+
+  if(!node.online){
+    document.getElementById('offlineNotice').innerHTML = `<div class="offline-note">This node is currently offline. Values below are the last readings received.</div>`;
+  } else {
+    document.getElementById('offlineNotice').innerHTML = '';
+  }
+  document.getElementById('liveValues').innerHTML = `
+    ${metricRowLg('Temperature', node.temp, '°C', node.thresholds.temp, 'temp')}
+    ${metricRowLg('Humidity', node.humidity, '%', node.thresholds.humidity, 'humidity')}
+    ${metricRowLg('Smoke (ADC)', node.smoke, '', node.thresholds.smoke, 'smoke')}
+    ${metricRowLg('AQI', node.aqi, '', node.thresholds.aqi, 'aqi')}
+    ${metricRowLg('Battery', node.battery, '%', node.thresholds.battery, 'battery')}
+  `;
+
+  // ---- Configuration panel: thresholds, buzzer, ping, ack — all pencil + password gated ----
+  const t = node.thresholds;
+  document.getElementById('configPanel').innerHTML = `
+    ${thresholdRow('Temperature', 'temp', t.temp, '°C')}
+    ${thresholdRow('Humidity', 'humidity', t.humidity, '%')}
+    ${thresholdRow('Smoke', 'smoke', t.smoke)}
+    ${thresholdRow('AQI', 'aqi', t.aqi)}
+    ${thresholdRow('Battery', 'battery', t.battery, '%')}
+    <div class="config-row">
+      <span class="form-label">Buzzer</span>
+      <span class="editable-wrap">
+        <span class="config-value">${node.buzzer === 'enabled' ? 'Enabled' : 'Muted'}</span>
+        <span class="edit-pencil" id="buzzerPencil" title="Toggle buzzer">${ICONS.pencil}</span>
+      </span>
+    </div>
+    <div class="config-row">
+      <span class="form-label">ChirpStack API key</span>
+      <span class="editable-wrap">
+        <span class="config-value" style="${node.apiKey ? '' : 'color:var(--text-tertiary); font-weight:500;'}">${node.apiKey ? maskApiKey(node.apiKey) : 'Not provisioned'}</span>
+        <span class="edit-pencil" id="apiKeyPencil" title="${node.apiKey ? 'Update' : 'Add'} API key">${ICONS.pencil}</span>
+      </span>
+    </div>
+    ${sev==='alarm' ? `<div class="config-row"><span class="form-label">Alarm acknowledgement</span><span>${node.ack ? '<span style="color:var(--green)">Acknowledged</span>' : '<button class="btn primary" id="ackBtn">Acknowledge</button>'}</span></div>` : ''}
+    <div class="btn-row">
+      <button class="btn" id="pingBtn">Ping Sensor</button>
+    </div>
+  `;
+
+  document.querySelectorAll('[data-edit-threshold]').forEach(pencil=>{
+    pencil.addEventListener('click', ()=>{
+      if(!requestEditUnlock()) return;
+      const key = pencil.dataset.editThreshold;
+      const current = node.thresholds[key];
+      const amberStr = window.prompt(`${key} amber threshold:`, current.amber);
+      if(amberStr === null) return;
+      const redStr = window.prompt(`${key} red threshold:`, current.red);
+      if(redStr === null) return;
+      const amber = Number(amberStr), red = Number(redStr);
+      if(Number.isNaN(amber) || Number.isNaN(red)){ window.alert('Enter valid numbers.'); return; }
+      const newThresholds = {...node.thresholds, [key]: {amber, red}};
+      MedjayData.setThresholds(node.id, newThresholds);
+      showToast('Thresholds updated');
+      render();
+    });
+  });
+
+  document.getElementById('buzzerPencil').addEventListener('click', ()=>{
+    if(!requestEditUnlock()) return;
+    MedjayData.toggleBuzzer(node.id);
+    showToast('Buzzer setting updated');
+    render();
+  });
+
+  document.getElementById('apiKeyPencil').addEventListener('click', ()=>{
+    if(!requestEditUnlock()) return;
+    const entered = window.prompt(
+      node.apiKey
+        ? 'Update ChirpStack API key (leave blank to remove):'
+        : 'ChirpStack API key for this node:',
+      ''
+    );
+    if(entered === null) return; // cancelled
+    if(entered.trim() === ''){
+      if(node.apiKey){ MedjayData.clearApiKey(node.id); showToast('API key removed'); render(); }
+      return;
+    }
+    MedjayData.setApiKey(node.id, entered.trim());
+    showToast(node.apiKey ? 'API key updated' : 'API key provisioned');
+    render();
+  });
+
+  document.getElementById('pingBtn').addEventListener('click', ()=>{
+    const online = MedjayData.pingNode(node.id);
+    showToast(online ? 'Ping successful — node responded' : 'Ping failed — node did not respond');
+    render();
+  });
+  const ackBtn = document.getElementById('ackBtn');
+  if(ackBtn) ackBtn.addEventListener('click', ()=>{ MedjayData.ackAlarm(node.id); showToast('Alarm acknowledged'); render(); });
+
+  // ---- Event history ----
+  const logs = MedjayData.getLogs().filter(l => l.sensor === nodeId);
+  document.getElementById('logCount').textContent = `${logs.length} event${logs.length===1?'':'s'}`;
+  document.getElementById('nodeLogBody').innerHTML = logs.length ? logs.map(l => `
+    <tr><td>${fmtTs(l.ts)}</td><td>${l.event}</td><td>${l.user||'—'}</td></tr>
+  `).join('') : `<tr><td colspan="3" class="empty-state">No events recorded for this node yet.</td></tr>`;
+}
+
+
+tickClock(); setInterval(tickClock, 1000);
+wireGlobalSearch();
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Medjay Aeris — Logs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div id="topbarMount"></div>
+<div class="summary-strip" id="summaryStrip"></div>
+
+<div class="log-toolbar">
+  <select class="log-select" id="filterGateway"><option value="">All gateways</option></select>
+  <select class="log-select" id="filterEvent"><option value="">All event types</option></select>
+  <select class="log-select" id="filterDate">
+    <option value="">All time</option>
+    <option value="1">Last 24 hours</option>
+    <option value="7">Last 7 days</option>
+    <option value="30">Last 30 days</option>
+  </select>
+  <input class="log-input" id="filterSearch" type="text" placeholder="Search sensor ID, event, user…">
+  <div class="toolbar-spacer"></div>
+  <span class="count-label" id="logCountLabel"></span>
+</div>
+
+<div class="page">
+  <div class="table-wrap">
+    <table class="log-table">
+      <thead><tr><th>Timestamp</th><th>Gateway</th><th>Sensor</th><th>Event</th><th>User</th></tr></thead>
+      <tbody id="logBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="shared.js"></script>
+<script>
+document.getElementById('topbarMount').outerHTML = renderTopbar('logs');
+
+const gateways = MedjayData.getGateways();
+const gwSelect = document.getElementById('filterGateway');
+gateways.forEach(g => gwSelect.insertAdjacentHTML('beforeend', `<option value="${g.id}">${g.name}</option>`));
+
+const allEvents = [...new Set(MedjayData.getLogs().map(l=>l.event))].sort();
+const evSelect = document.getElementById('filterEvent');
+allEvents.forEach(e => evSelect.insertAdjacentHTML('beforeend', `<option value="${e}">${e}</option>`));
+
+function eventTagClass(event){
+  if(event.includes('Alarm Triggered')) return 'alarm';
+  if(event.includes('Offline')) return 'offline'; // distinct from alarm — spec requires offline ≠ alarm color
+  if(event.includes('Warning') || event.includes('Threshold')) return 'warn';
+  if(event.includes('Cleared') || event.includes('Acknowledged') || event.includes('Online')) return 'ok';
+  return 'neutral';
+}
+
+function render(){
+  document.getElementById('summaryStrip').innerHTML = renderSummaryStripHTML();
+  let logs = MedjayData.getLogs();
+
+  const gw = gwSelect.value;
+  const ev = evSelect.value;
+  const days = Number(document.getElementById('filterDate').value) || 0;
+  const q = document.getElementById('filterSearch').value.trim().toLowerCase();
+
+  if(gw) logs = logs.filter(l => l.gateway === gw);
+  if(ev) logs = logs.filter(l => l.event === ev);
+  if(days) logs = logs.filter(l => (Date.now() - l.ts) <= days*86400000);
+  if(q) logs = logs.filter(l =>
+    (l.sensor||'').toLowerCase().includes(q) ||
+    (l.event||'').toLowerCase().includes(q) ||
+    (l.user||'').toLowerCase().includes(q) ||
+    (l.gateway||'').toLowerCase().includes(q)
+  );
+
+  document.getElementById('logCountLabel').textContent = `${logs.length} events`;
+  document.getElementById('logBody').innerHTML = logs.length ? logs.map(l => {
+    const gwObj = gateways.find(g=>g.id===l.gateway);
+    return `<tr>
+      <td>${fmtTs(l.ts)}</td>
+      <td>${gwObj ? gwObj.name : (l.gateway || '—')}</td>
+      <td>${l.sensor || '—'}</td>
+      <td><span class="event-tag ${eventTagClass(l.event)}">${l.event}</span></td>
+      <td>${l.user || '—'}</td>
+    </tr>`;
+  }).join('') : `<tr><td colspan="5" class="empty-state">No log entries match these filters.</td></tr>`;
+}
+
+[gwSelect, evSelect, document.getElementById('filterDate')].forEach(el => el.addEventListener('change', render));
+document.getElementById('filterSearch').addEventListener('input', render);
+
+// A global search result for a log links here as logs.html?q=... — reuse
+// that same term to pre-filter the table the local search box already has.
+const qParam = new URLSearchParams(location.search).get('q');
+if(qParam){ document.getElementById('filterSearch').value = qParam; }
+
+tickClock(); setInterval(tickClock, 1000);
+wireGlobalSearch();
+render();
+</script>
+</body>
+</html>
