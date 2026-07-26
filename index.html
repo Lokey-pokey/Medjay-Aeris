@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Medjay Aeris — Gateway Overview</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div id="topbarMount"></div>
+<div class="summary-strip" id="summaryStrip"></div>
+
+<div class="toolbar">
+  <div class="filter-chip active" data-f="all"><span class="dot" style="background:var(--text-tertiary)"></span>All</div>
+  <div class="filter-chip" data-f="alarm"><span class="dot"></span>Alarm</div>
+  <div class="filter-chip" data-f="warn"><span class="dot"></span>Warning</div>
+  <div class="filter-chip" data-f="offline"><span class="dot"></span>Offline</div>
+  <div class="filter-chip" data-f="ok"><span class="dot"></span>Normal</div>
+  <div class="toolbar-spacer"></div>
+  <span class="count-label" id="countLabel"></span>
+  <button class="btn primary" id="addGwBtn">Register Gateway</button>
+</div>
+
+<div class="page">
+  <div class="gw-grid" id="gwGrid"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="shared.js"></script>
+<script>
+document.getElementById('topbarMount').outerHTML = renderTopbar('overview');
+document.getElementById('addGwBtn').innerHTML = ICONS.plus + ' Register Gateway';
+
+let activeFilter = "all";
+
+function promptGatewayForm(existing){
+  const name = window.prompt('Gateway name:', existing ? existing.name : '');
+  if(name === null) return null;
+  const location = window.prompt('Location:', existing ? existing.location : '');
+  if(location === null) return null;
+  const baseUrl = window.prompt('Base URL (e.g. http://localhost:5000 or https://gateway.triosafe.in):', existing ? existing.baseUrl : 'http://localhost:5000');
+  if(baseUrl === null) return null;
+  const apiKey = window.prompt('API key (Bearer token — optional, current API version requires none):', existing ? GatewayRegistry.getApiKeyPlain(existing.id) : '');
+  if(apiKey === null) return null;
+  return { name: name.trim()||'Unnamed Gateway', location: location.trim()||'—', baseUrl: baseUrl.trim(), apiKey: apiKey.trim() };
+}
+
+document.getElementById('addGwBtn').addEventListener('click', ()=>{
+  if(!requestEditUnlock()) return;
+  const fields = promptGatewayForm(null);
+  if(!fields) return;
+  GatewayRegistry.add(fields);
+  showToast('Gateway registered — polling started');
+  render();
+});
+
+function cardHTML(gw){
+  const entry = LiveStore.get(gw.id);
+  const reachable = !!(entry.status && entry.status.gateway === "online");
+  const sev = gwSeverity(gw.id);
+  const nodes = entry.nodes || [];
+  const totalNodes = nodes.length;
+  const onlineNodes = nodes.filter(n=>n.online).length;
+  const ok = nodes.filter(n=>nodeSeverity(n)==="ok").length;
+  const amber = nodes.filter(n=>nodeSeverity(n)==="warn").length;
+  const red = nodes.filter(n=>nodeSeverity(n)==="alarm").length;
+  const offlineN = nodes.filter(n=>nodeSeverity(n)==="offline").length;
+  const pct = totalNodes ? Math.round((onlineNodes/totalNodes)*100) : 0;
+  const badgeMap = {alarm:"ALARM", warn:"WARNING", offline:"OFFLINE", ok:"NORMAL"};
+
+  let alarmBanner;
+  if(sev === "alarm"){
+    alarmBanner = `<div class="alarm-banner active">${ICONS.alert}<span>${red} active alarm${red>1?'s':''}</span></div>`;
+  } else if(!reachable){
+    alarmBanner = `<div class="offline-note">${entry.lastError ? `Gateway unreachable — ${entry.lastError}` : 'Gateway unreachable'}</div>`;
+  } else {
+    alarmBanner = `<div class="alarm-banner clear">${ICONS.check}<span>No active alarms</span></div>`;
+  }
+
+  return `
+  <div class="gw-card state-${sev}" data-id="${gw.id}" data-sev="${sev}" tabindex="0">
+    <div class="gw-head">
+      <div class="gw-title-block">
+        <div class="gw-name-row">
+          <span class="status-dot ${reachable?'online':'offline'}"></span>
+          <span class="editable-wrap">
+            <span class="gw-name">${gw.name}</span>
+            <span class="edit-pencil" data-edit="gw-config" data-gw="${gw.id}" role="button" tabindex="0" aria-label="Edit gateway ${gw.name}" title="Edit gateway">${ICONS.pencil}</span>
+          </span>
+        </div>
+        <div class="gw-location">${ICONS.pin}<span>${gw.location}</span></div>
+        <div class="gw-location" style="font-family:var(--mono); font-size:10.5px;">${gw.baseUrl || '(no base URL configured)'}</div>
+      </div>
+      <span class="health-badge ${sev}">${badgeMap[sev]}</span>
+    </div>
+    <div class="divider"></div>
+    <div class="conn-row">
+      <div class="conn-item ${entry.status && entry.status.lora ? 'up':'down'}"><span class="cdot"></span>${ICONS.lora}<span>LoRa ${entry.status && entry.status.lora ? 'Connected':'Disconnected'}</span></div>
+      <div class="conn-item ${entry.status && entry.status.database ? 'up':'down'}"><span class="cdot"></span><span>DB ${entry.status && entry.status.database ? 'Connected':'Disconnected'}</span></div>
+    </div>
+    <div class="nodes-row">
+      <div class="row-label"><span>Sensor nodes</span><b>${onlineNodes}/${totalNodes} online</b></div>
+      <div class="seg-bar"><div class="seg-online" style="width:${pct}%"></div><div class="seg-offline" style="width:${100-pct}%"></div></div>
+    </div>
+    <div class="threshold-row">
+      <span class="t-item"><span class="tdot g"></span>${ok}</span>
+      <span class="t-item"><span class="tdot a"></span>${amber}</span>
+      <span class="t-item"><span class="tdot r"></span>${red}</span>
+      <span class="t-item"><span class="tdot o"></span>${offlineN}</span>
+    </div>
+    ${alarmBanner}
+    <div class="gw-footer">
+      <span>${entry.status ? `Uptime ${Math.floor((entry.status.uptime||0)/60)}m` : '—'}</span>
+      <span>${entry.lastPolled ? 'Polled ' + fmtAgo(Math.floor(entry.lastPolled/1000)) : 'Not yet polled'}</span>
+    </div>
+    <div class="gw-footer">
+      <button class="btn danger" data-remove="${gw.id}" style="font-size:11px; padding:3px 8px;">Remove</button>
+    </div>
+  </div>`;
+}
+
+function applyFilters(list){
+  if(activeFilter === "all") return list;
+  return list.filter(gw => gwSeverity(gw.id) === activeFilter);
+}
+
+function render(){
+  ensureAllGatewaysPolling();
+  document.getElementById('summaryStrip').innerHTML = renderSummaryStripHTML();
+  const gateways = GatewayRegistry.list();
+  const filtered = applyFilters(gateways).sort((a,b)=>severityRank(gwSeverity(a.id))-severityRank(gwSeverity(b.id)));
+
+  if(!gateways.length){
+    document.getElementById('gwGrid').innerHTML = `<div class="empty-state">No gateways registered yet. Click "Register Gateway" to connect to a TRIOSAFE Aeris gateway's REST API.</div>`;
+  } else {
+    document.getElementById('gwGrid').innerHTML = filtered.map(cardHTML).join('') || `<div class="empty-state">No gateways match this filter.</div>`;
+  }
+  document.getElementById('countLabel').textContent = `${filtered.length} of ${gateways.length} gateways`;
+
+  document.querySelectorAll('.gw-card').forEach(card=>{
+    card.addEventListener('click', (e)=>{
+      if(e.target.closest('[data-edit]') || e.target.closest('[data-remove]')) return;
+      window.location.href = `gateway-detail.html?gw=${encodeURIComponent(card.dataset.id)}`;
+    });
+  });
+  document.querySelectorAll('[data-edit="gw-config"]').forEach(pencil=>{
+    const openEditor = (e)=>{
+      e.stopPropagation();
+      if(!requestEditUnlock()) return;
+      const gw = GatewayRegistry.get(pencil.dataset.gw);
+      if(!gw) return;
+      const fields = promptGatewayForm(gw);
+      if(!fields) return;
+      GatewayRegistry.update(gw.id, fields);
+      showToast('Gateway config updated');
+      render();
+    };
+    pencil.addEventListener('click', openEditor);
+    pencil.addEventListener('keydown', (e)=>{
+      if(e.key==='Enter' || e.key===' '){ e.preventDefault(); openEditor(e); }
+    });
+  });
+  document.querySelectorAll('[data-remove]').forEach(btn=>{
+    btn.addEventListener('click', (e)=>{
+      e.stopPropagation();
+      if(!requestEditUnlock()) return;
+      if(!window.confirm('Remove this gateway from the dashboard? (Does not affect the physical device.)')) return;
+      GatewayRegistry.remove(btn.dataset.remove);
+      showToast('Gateway removed');
+      render();
+    });
+  });
+}
+
+wireGlobalSearch();
+document.querySelectorAll('.filter-chip').forEach(chip=>{
+  chip.addEventListener('click', ()=>{
+    document.querySelectorAll('.filter-chip').forEach(c=>c.classList.remove('active'));
+    chip.classList.add('active');
+    activeFilter = chip.dataset.f;
+    render();
+  });
+});
+
+tickClock(); setInterval(tickClock, 1000);
+render();
+setInterval(render, 5000); // matches spec's recommended /api/status + /api/nodes refresh interval
+</script>
+</body>
+</html>
